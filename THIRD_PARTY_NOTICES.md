@@ -23,5 +23,6 @@ The source archive includes the application and build instructions. Python 3.11 
 | NumPy 1.26.4 and SciPy 1.13.1 | Numerical processing | BSD-3-Clause; wheel notices also apply |
 | ONNX Runtime 1.18.1 | Optional model inference | MIT |
 | Protobuf 6.33.5 | Runtime support | BSD-3-Clause |
+| SAM 2 (facebookresearch/sam2), PyTorch | Optional teeth segmentation, installed by `tools/setup_sam2.py` | Apache-2.0; PyTorch BSD-3-Clause |
 
 This table summarizes the main direct dependencies, not every file in a packaged executable. Preserve each dependency's complete license and bundled notices when distributing it. Downloaded model weights have separate licenses listed in the [model inventory](README.md#models).

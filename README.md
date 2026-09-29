@@ -87,6 +87,15 @@ python tools/bootstrap_dev.py
 .venv\Scripts\python FaceSlim_v1.py
 ```
 
+Windows with an NVIDIA GPU, including CUDA PyTorch and the SAM 2 teeth mask:
+
+```powershell
+.\setup.bat
+.\run.bat
+```
+
+See [docs/SETUP_WINDOWS_GPU.md](docs/SETUP_WINDOWS_GPU.md) for requirements, options, and troubleshooting.
+
 macOS or Linux:
 
 ```bash
@@ -122,7 +131,7 @@ Python 3.10 or newer is required. Python 3.11 is the tested release host. See [C
 |---|---|
 | Skin Smoothing | Softens skin while retaining visible texture |
 | Skin Tone Even | Reduces local redness and color variation |
-| Teeth Whitening | Changes only the parsed mouth interior |
+| Teeth Whitening | Changes only the parsed mouth interior, or only the teeth when the Teeth Mask is set to SAM 2 |
 | Eye Sharpen | Adds local detail around eyes and brows |
 | Lip Color | Adjusts lip saturation and warmth |
 | Under-Eye Smooth | Treats the area beneath each eye separately |
@@ -170,6 +179,9 @@ python FaceSlim_v1.py --input clip.mp4 --preset Glamour \
 python FaceSlim_v1.py --input photo.jpg --parser-model bisenet_resnet34 \
   --onnx-provider cpu --skin-smooth 35
 
+# Whiten teeth using a SAM 2 mask prompted from lip landmarks
+python FaceSlim_v1.py --input smile.jpg --teeth-whiten 60 --teeth-segmenter sam2
+
 # Inspect models and provider status
 python FaceSlim_v1.py --list-models --onnx-provider cpu
 python FaceSlim_v1.py --provider-diagnostics --onnx-provider auto
@@ -197,8 +209,25 @@ FaceSlim can add an optional visible disclosure watermark. Exported images also 
 | MODNet | 26 MB | Apache-2.0 | Optional matte refinement |
 | GFPGAN 1.4 | 340 MB | Apache-2.0 | Optional face restoration |
 | Real-ESRGAN 2x | 70 MB | BSD-3-Clause | Optional 2x upscale |
+| SAM 2.1 Hiera Tiny | 156 MB | Apache-2.0 | Optional teeth-only mask |
 
-The landmarker and selected BiSeNet model download on first use. MODNet, GFPGAN, and Real-ESRGAN download only when their related feature is enabled. If face parsing is unavailable, geometry controls still work with landmark-based masking.
+The landmarker and selected BiSeNet model download on first use. MODNet, GFPGAN, Real-ESRGAN, and SAM 2 download only when their related feature is enabled. If face parsing is unavailable, geometry controls still work with landmark-based masking.
+
+### SAM 2 teeth mask
+
+SAM 2 needs PyTorch and the `sam2` package, which are not in `requirements.txt`. Install them into the interpreter that runs FaceSlim:
+
+```powershell
+python tools/setup_sam2.py
+```
+
+The script clones [facebookresearch/sam2](https://github.com/facebookresearch/sam2) into `third_party/sam2` at a pinned commit, installs it without the optional CUDA extension, downloads and verifies the checkpoint, and loads the model once. `setup.bat` runs the same steps as part of the full GPU setup. FaceSlim builds SAM prompts from the MediaPipe inner-lip landmarks: a box around the mouth opening, positive points on the upper teeth, and negative points on the lips, mouth corners, philtrum, and chin. SAM is skipped when the mouth is closed. Live webcam and video preview run SAM on a background thread and move the latest mask with the mouth, so preview never waits for it. Exports run SAM every fourth frame and move the mask with the mouth in between.
+
+To inspect the prompts and mask for one image:
+
+```powershell
+python tools/sam2_teeth_debug.py smile.jpg
+```
 
 ## Supported media
 

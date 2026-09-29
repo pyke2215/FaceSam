@@ -63,6 +63,12 @@ class VideoThread(QThread):
             self._seek_seconds = None
             return seconds
 
+    def _new_engine(self):
+        eng = FaceWarpEngine('video', self.max_faces, self.parser_model, self.onnx_provider)
+        eng.async_teeth_sam = True
+        eng.set_temporal_beta(self.params.get('temporal', 50) / 5000.0)
+        return eng
+
     def run(self):
         eng = None
         cap = None
@@ -70,10 +76,7 @@ class VideoThread(QThread):
         virtual_cam_shape = None
         try:
             self.running = True
-            eng = FaceWarpEngine('video', self.max_faces, self.parser_model, self.onnx_provider)
-            # Apply temporal beta
-            beta = self.params.get('temporal', 50) / 5000.0
-            eng.set_temporal_beta(beta)
+            eng = self._new_engine()
 
             cap = cv2.VideoCapture(0 if self.source is None else self.source)
             if not cap.isOpened():
@@ -93,8 +96,7 @@ class VideoThread(QThread):
                     cap.set(cv2.CAP_PROP_POS_MSEC, seek_to * 1000.0)
                     if eng is not None:
                         eng.close()
-                    eng = FaceWarpEngine('video', self.max_faces, self.parser_model, self.onnx_provider)
-                    eng.set_temporal_beta(self.params.get('temporal', 50) / 5000.0)
+                    eng = self._new_engine()
                 if self.paused and seek_to is None:
                     self.msleep(50); continue
                 t0 = time.time()
@@ -102,9 +104,7 @@ class VideoThread(QThread):
                 if not ret:
                     if self.source is not None:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        eng.close(); eng = FaceWarpEngine(
-                            'video', self.max_faces, self.parser_model, self.onnx_provider)
-                        eng.set_temporal_beta(self.params.get('temporal', 50) / 5000.0)
+                        eng.close(); eng = self._new_engine()
                         self.timeline_update.emit(0.0, duration)
                         continue
                     break
@@ -130,7 +130,8 @@ class VideoThread(QThread):
                     eng.set_temporal_beta(self.params.get('temporal', 50) / 5000.0)
 
                     proc = eng.warp(rgb, faces, self.params) if has_fx else rgb.copy()
-                    teeth_hint_rois = eng.teeth_hint_rois(proc, faces) if (self.show_teeth_hint and faces) else []
+                    teeth_hint_rois = (eng.teeth_hint_rois(proc, faces, self.params)
+                                       if (self.show_teeth_hint and faces) else [])
                     if self.virtualcam_enabled:
                         try:
                             vh, vw = proc.shape[:2]

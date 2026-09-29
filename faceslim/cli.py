@@ -33,6 +33,8 @@ def cli_process(args):
                  if hasattr(args, k) and getattr(args, k) is not None}
     if getattr(args, "post_stage_model", None):
         overrides["post_stage_model"] = args.post_stage_model
+    if getattr(args, "teeth_segmenter", None):
+        overrides["teeth_segmenter"] = args.teeth_segmenter
     try:
         params = params_from_preset_and_overrides(args.preset, overrides)
         face_overrides = parse_face_overrides(args.face_preset, args.face_param)
@@ -65,6 +67,7 @@ def cli_process(args):
     print(f"  GPU: {'ON (' + GPU_NAME + ')' if USE_GPU else 'OFF'}")
     print(f"  ONNX Provider: {onnx_provider_label(onnx_provider)}")
     print(f"  Post-stage: {post_stage_model_label(params.get('post_stage_model'))}")
+    print(f"  Teeth mask: {teeth_segmenter_label(params.get('teeth_segmenter'))}")
     print(f"  Files: {len(inputs)}")
     print(f"  Params: {json.dumps({k: v for k, v in params.items() if v != 0}, indent=2)}")
     print(f"  Output: {output_dir}\n")
@@ -226,6 +229,8 @@ Examples:
                         help='Blendshape-guided frown and brow dampening (0-100)')
     parser.add_argument('--skin-smooth', type=int, dest='skin_smooth', help='AI skin smoothing (0-100)')
     parser.add_argument('--teeth-whiten', type=int, dest='teeth_whiten', help='AI teeth whitening (0-100)')
+    parser.add_argument('--teeth-segmenter', dest='teeth_segmenter', choices=list(TEETH_SEGMENTER_OPTIONS.keys()),
+                        help='Teeth mask source: face parsing (default) or SAM 2 prompted by lip landmarks')
     parser.add_argument('--eye-sharpen', type=int, dest='eye_sharpen', help='AI eye sharpening (0-100)')
     parser.add_argument('--skin-tone-even', type=int, dest='skin_tone_even', help='AI skin tone evening (0-100)')
     parser.add_argument('--lip-color', type=int, dest='lip_color', help='AI lip color enhancement (0-100)')

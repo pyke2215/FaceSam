@@ -44,6 +44,7 @@ from .runtime import (
 )
 from .models import *
 from .models import _model_path, _remove_quietly
+from .teeth_sam import paste_result_into_roi
 
 JAW_CONTOUR = [10,338,297,332,284,251,389,356,454,323,361,288,
                397,365,379,378,400,377,152,148,176,149,150,136,
@@ -109,7 +110,15 @@ DEFAULT_PARAMS = {'jaw': 0, 'cheeks': 0, 'chin': 0, 'face_width': 0,
                   'post_stage_model': POST_STAGE_OFF,
                   'post_stage_strength': 50,
                   'post_stage_fidelity': 70,
-                  'post_stage_tile': 512}
+                  'post_stage_tile': 512,
+                  'teeth_segmenter': 'parsing'}
+
+TEETH_SEGMENTER_OPTIONS = {
+    'parsing': {'label': 'Face parsing (BiSeNet)'},
+    'sam2': {'label': 'SAM 2 (landmark prompts)'},
+}
+DEFAULT_TEETH_SEGMENTER = 'parsing'
+SAM_TEETH_VIDEO_INTERVAL = 4
 
 EFFECT_PARAM_KEYS = (
     'jaw', 'cheeks', 'chin', 'face_width', 'forehead', 'nose', 'eye_enlarge',
@@ -130,6 +139,15 @@ def post_stage_model_key(value=None):
 
 def post_stage_model_label(value=None):
     return POST_STAGE_OPTIONS[post_stage_model_key(value)]["label"]
+
+
+def teeth_segmenter_key(value=None):
+    key = str(value or DEFAULT_TEETH_SEGMENTER).strip().lower()
+    return key if key in TEETH_SEGMENTER_OPTIONS else DEFAULT_TEETH_SEGMENTER
+
+
+def teeth_segmenter_label(value=None):
+    return TEETH_SEGMENTER_OPTIONS[teeth_segmenter_key(value)]["label"]
 
 
 def post_stage_model_keys(value=None):
@@ -519,17 +537,20 @@ def apply_teeth_hint_rois(frame, hint_rois):
     return result
 
 
-def apply_teeth_whitening(frame, parsing, strength):
+def apply_teeth_whitening(frame, parsing, strength, mask=None):
     """Whiten teeth within mouth interior mask.
-    Uses HSV: increase V, decrease S in mouth interior only (not lips)."""
-    if strength <= 0 or parsing is None:
+    Uses HSV: increase V, decrease S in mouth interior only (not lips).
+    An explicit mask (e.g. from SAM 2) takes precedence over the parsing mask."""
+    if strength <= 0 or (parsing is None and mask is None):
         return frame
 
     # Only mouth interior (teeth/tongue visible area) - NOT lips
-    mask = teeth_target_mask(parsing, feather=5)
+    if mask is None:
+        mask = teeth_target_mask(parsing, feather=5)
 
     if mask.max() < 0.01:
         return frame
+    mask_3 = mask[:, :, np.newaxis]
 
     s = strength / 100.0
     hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV).astype(np.float32)
@@ -968,6 +989,8 @@ def coerce_param_overrides(values):
             overrides[normalized] = max(0, min(int(value), 1024 if normalized == "post_stage_tile" else 100))
         elif normalized == "post_stage_model":
             overrides[normalized] = post_stage_model_key(value)
+        elif normalized == "teeth_segmenter":
+            overrides[normalized] = teeth_segmenter_key(value)
     return overrides
 
 
@@ -1496,6 +1519,11 @@ class FaceWarpEngine:
         self.matter = None
         self.face_restorer = None
         self.upscaler = None
+        self.teeth_sam = None
+        self._teeth_sam_failed = False
+        # Live preview sets this so SAM 2 runs on a worker thread; exports stay frame-exact.
+        self.async_teeth_sam = False
+        self._teeth_sam_async = None
         if ensure_parsing_model(self.parser_model):
             try:
                 self.parser = FaceParsingEngine(self.parser_model, self.onnx_provider)
@@ -1702,8 +1730,58 @@ class FaceWarpEngine:
         merged.pop('face_params', None)
         return merged
 
-    def teeth_hint_rois(self, frame, faces):
-        if self.parser is None or not faces:
+    def _get_teeth_sam(self):
+        if self.teeth_sam is None and not self._teeth_sam_failed:
+            try:
+                from .teeth_sam import shared_segmenter
+                self.teeth_sam = shared_segmenter()
+            except Exception as e:
+                self._teeth_sam_failed = True
+                print(f"  SAM 2 teeth segmenter unavailable: {e} (using face parsing mask)")
+        return self.teeth_sam
+
+    def _async_sam_teeth_mask(self, frame, lms, roi_bounds, roi_shape, face_idx, submit):
+        if self._teeth_sam_async is None:
+            from .teeth_sam import AsyncTeethSam
+            self._teeth_sam_async = AsyncTeethSam()
+        worker = self._teeth_sam_async
+        if worker.failed:
+            return None
+        if submit:
+            worker.submit(face_idx, frame, lms)
+        has_result, result = worker.latest(face_idx)
+        if not has_result:
+            return None
+        return paste_result_into_roi(result, roi_bounds, roi_shape, lms)
+
+    def _sam_teeth_mask(self, frame, lms, roi_bounds, roi_shape, face_idx=0, submit=True):
+        """SAM 2 teeth mask in ROI coordinates, or None if SAM 2 cannot run (yet)."""
+        if self.mode == 'video' and self.async_teeth_sam:
+            return self._async_sam_teeth_mask(frame, lms, roi_bounds, roi_shape, face_idx, submit)
+        segmenter = self._get_teeth_sam()
+        if segmenter is None:
+            return None
+        cache = self._caches[min(face_idx, len(self._caches) - 1)]
+        key = (lms[:468:4] / 2.0).astype(np.int32).tobytes()
+        entry = cache.get('sam_teeth')
+        if entry is None:
+            stale = True
+        elif self.mode == 'video':
+            stale = self.ts - entry[0] >= SAM_TEETH_VIDEO_INTERVAL * 33
+        else:
+            stale = entry[1] != key
+        if stale:
+            try:
+                entry = (self.ts, key, segmenter.segment(frame, lms))
+            except Exception as e:
+                print(f"SAM 2 teeth segmentation error: {e}")
+                return None
+            cache['sam_teeth'] = entry
+        return paste_result_into_roi(entry[2], roi_bounds, roi_shape, lms)
+
+    def teeth_hint_rois(self, frame, faces, params=None):
+        use_sam = teeth_segmenter_key((params or {}).get('teeth_segmenter')) == 'sam2'
+        if (self.parser is None and not use_sam) or not faces:
             return []
         h, w = frame.shape[:2]
         hint_rois = []
@@ -1715,8 +1793,13 @@ class FaceWarpEngine:
                 roi_region = frame[ry1:ry2, rx1:rx2]
                 if roi_region.size == 0:
                     continue
-                parsing = self.parser.parse(roi_region)
-                mask = teeth_target_mask(parsing, feather=5)
+                mask = None
+                if use_sam:
+                    mask = self._sam_teeth_mask(frame, lms, roi_bounds, roi_region.shape,
+                                                face_idx=i, submit=False)
+                if mask is None and self.parser is not None:
+                    parsing = self.parser.parse(roi_region)
+                    mask = teeth_target_mask(parsing, feather=5)
                 if mask is not None and mask.max() >= 0.01:
                     hint_rois.append((roi_bounds, mask))
             except Exception as e:
@@ -2027,7 +2110,11 @@ class FaceWarpEngine:
 
                     # Teeth whitening
                     if teeth_whiten > 0:
-                        roi_region = apply_teeth_whitening(roi_region, parsing, teeth_whiten)
+                        teeth_mask = None
+                        if teeth_segmenter_key(fp.get('teeth_segmenter')) == 'sam2':
+                            teeth_mask = self._sam_teeth_mask(
+                                result, lms, roi_bounds, roi_region.shape, face_idx=i)
+                        roi_region = apply_teeth_whitening(roi_region, parsing, teeth_whiten, teeth_mask)
 
                     # Eye sharpening
                     if eye_sharpen > 0:
@@ -2275,6 +2362,9 @@ class FaceWarpEngine:
         return self.warp(frame_rgb, faces, params), faces
 
     def close(self):
+        if self._teeth_sam_async is not None:
+            self._teeth_sam_async.close()
+            self._teeth_sam_async = None
         self.landmarker.close()
 
 # ═══════════════════════════════════════════════════════════════════════════

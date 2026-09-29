@@ -591,5 +591,147 @@ class ProvenanceMetadataTests(unittest.TestCase):
                 self.assertIn("AI modified by FaceSlim", exif.get(270))
 
 
+def _mouth_landmarks(open_px, cx=100.0, cy=120.0, half_w=30.0):
+    lms = np.full((478, 2), (cx, cy - 60.0), dtype=np.float64)
+    upper = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308]
+    lower = [95, 88, 178, 87, 14, 317, 402, 318, 324]
+    for j, idx in enumerate(upper):
+        x = cx - half_w + 2 * half_w * j / (len(upper) - 1)
+        lms[idx] = (x, cy - open_px / 2 * (1 - ((x - cx) / half_w) ** 2))
+    for j, idx in enumerate(lower):
+        x = cx - half_w + 2 * half_w * (j + 1) / (len(lower) + 1)
+        lms[idx] = (x, cy + open_px / 2 * (1 - ((x - cx) / half_w) ** 2))
+    lms[61] = (cx - half_w - 6, cy)
+    lms[291] = (cx + half_w + 6, cy)
+    lms[0] = (cx, cy - open_px / 2 - 8)
+    lms[17] = (cx, cy + open_px / 2 + 8)
+    lms[2] = (cx, cy - 30)
+    lms[152] = (cx, cy + 50)
+    return lms
+
+
+class TeethSamPromptTests(unittest.TestCase):
+    def setUp(self):
+        from faceslim import teeth_sam
+        self.teeth_sam = teeth_sam
+
+    def _frame(self, lms):
+        frame = np.full((200, 240, 3), 70, dtype=np.uint8)
+        cv2.fillPoly(frame, [self.teeth_sam.mouth_inner_polygon(lms)], (235, 235, 230))
+        return frame
+
+    def test_closed_mouth_skips_sam(self):
+        lms = _mouth_landmarks(open_px=1)
+        self.assertIsNone(self.teeth_sam.teeth_sam_prompts(lms, self._frame(lms)))
+
+    def test_open_mouth_prompts_teeth_positive_and_surroundings_negative(self):
+        lms = _mouth_landmarks(open_px=16)
+        frame = self._frame(lms)
+
+        points, labels, box = self.teeth_sam.teeth_sam_prompts(lms, frame)
+
+        inside = np.zeros(frame.shape[:2], np.uint8)
+        cv2.fillPoly(inside, [self.teeth_sam.mouth_inner_polygon(lms)], 1)
+        positives = points[labels == 1].round().astype(int)
+        negatives = points[labels == 0].round().astype(int)
+        self.assertGreaterEqual(len(positives), 2)
+        self.assertEqual(len(negatives), 6)
+        self.assertTrue(all(inside[y, x] for x, y in positives))
+        self.assertFalse(any(inside[y, x] for x, y in negatives))
+        self.assertLessEqual(box[0], lms[78][0])
+        self.assertGreaterEqual(box[2], lms[308][0])
+
+    def test_paste_result_follows_mouth_motion(self):
+        lms = _mouth_landmarks(open_px=16)
+        crop_mask = np.zeros((20, 20), np.float32)
+        crop_mask[10, 10] = 1.0
+        result = self.teeth_sam.TeethSamResult(
+            (90, 110, 110, 130), crop_mask, None, None, None, (lms[13] + lms[14]) / 2.0)
+        moved = lms.copy()
+        moved[:, 0] += 3
+
+        mask = self.teeth_sam.paste_result_into_roi(result, (80, 100, 140, 160), (60, 60), moved, feather=0)
+
+        self.assertEqual(mask[20, 23], 1.0)
+        self.assertEqual(mask.sum(), 1.0)
+
+
+class AsyncTeethSamTests(unittest.TestCase):
+    class FakeSegmenter:
+        warmed = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def segment_prepared(self, crop, local_lms, offset):
+            self.calls += 1
+            return ("mask", crop.shape, tuple(offset))
+
+    def _wait_for_result(self, worker, face_idx):
+        import time
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            has_result, result = worker.latest(face_idx)
+            if has_result:
+                return result
+            time.sleep(0.01)
+        self.fail("worker produced no result")
+
+    def test_open_mouth_is_segmented_on_worker_thread(self):
+        from faceslim.teeth_sam import AsyncTeethSam
+        fake = self.FakeSegmenter()
+        worker = AsyncTeethSam(factory=lambda: fake)
+        try:
+            lms = _mouth_landmarks(open_px=16)
+            worker.submit(0, np.zeros((200, 240, 3), np.uint8), lms)
+            result = self._wait_for_result(worker, 0)
+        finally:
+            worker.close()
+        self.assertEqual(result[0], "mask")
+        self.assertEqual(fake.calls, 1)
+
+    def test_closed_mouth_reports_no_teeth_without_running_sam(self):
+        from faceslim.teeth_sam import AsyncTeethSam
+        fake = self.FakeSegmenter()
+        worker = AsyncTeethSam(factory=lambda: fake)
+        try:
+            worker.submit(0, np.zeros((200, 240, 3), np.uint8), _mouth_landmarks(open_px=1))
+            self.assertEqual(worker.latest(0), (True, None))
+        finally:
+            worker.close()
+        self.assertEqual(fake.calls, 0)
+
+    def test_factory_failure_marks_worker_failed(self):
+        from faceslim.teeth_sam import AsyncTeethSam
+
+        def broken():
+            raise RuntimeError("no sam2")
+
+        worker = AsyncTeethSam(factory=broken)
+        worker._thread.join(timeout=5)
+        self.assertTrue(worker.failed)
+
+
+class TeethSegmenterParamTests(unittest.TestCase):
+    def test_teeth_segmenter_key_falls_back_to_parsing(self):
+        self.assertEqual(faceslim.teeth_segmenter_key("SAM2"), "sam2")
+        self.assertEqual(faceslim.teeth_segmenter_key("bogus"), "parsing")
+        self.assertEqual(faceslim.DEFAULT_PARAMS["teeth_segmenter"], "parsing")
+
+    def test_overrides_accept_teeth_segmenter(self):
+        params = faceslim.params_from_preset_and_overrides("Beauty", {"teeth-segmenter": "sam2"})
+        self.assertEqual(params["teeth_segmenter"], "sam2")
+
+    def test_teeth_whitening_with_explicit_mask_only_touches_mask(self):
+        frame = np.full((10, 10, 3), 150, dtype=np.uint8)
+        mask = np.zeros((10, 10), np.float32)
+        mask[2:5, 2:5] = 1.0
+
+        out = faceslim.apply_teeth_whitening(frame, None, 80, mask)
+
+        self.assertTrue((out[3, 3] > frame[3, 3]).all())
+        np.testing.assert_array_equal(out[8, 8], frame[8, 8])
+
+
 if __name__ == "__main__":
     unittest.main()

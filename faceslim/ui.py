@@ -404,6 +404,7 @@ class FaceSlimApp(QMainWindow):
             (self.btn_model_refresh, "Refresh model inventory", "Refresh model verification, source, license, and cache status."),
             (self.btn_model_redownload, "Redownload model", "Redownload the selected model artifact and verify its hash."),
             (self.combo_post_stage, "Post-stage model", "Choose optional GFPGAN restoration, Real-ESRGAN upscale, both, or off."),
+            (self.combo_teeth_segmenter, "Teeth mask segmenter", "Choose face parsing or SAM 2 landmark-prompted teeth segmentation."),
             (self.chk_lm, "Show landmarks", "Overlay detected face landmarks on the preview."),
             (self.chk_conf, "Show confidence", "Overlay face detection confidence on the preview."),
             (self.chk_teeth_hint, "Show teeth mask", "Overlay the whitening target mask in preview only."),
@@ -435,6 +436,7 @@ class FaceSlimApp(QMainWindow):
             self.btn_webcam, self.btn_load, self.btn_stop, self.btn_undo, self.btn_redo,
             self.btn_cmp, self.btn_virtualcam, self.timeline_slider,
             *[slider for slider, _label in self.sliders.values()],
+            self.combo_teeth_segmenter,
             self.combo_parser_model, self.combo_onnx_provider, self.btn_provider_bench,
             self.combo_model_redownload, self.btn_model_refresh, self.btn_model_redownload,
             self.combo_post_stage,
@@ -606,6 +608,16 @@ class FaceSlimApp(QMainWindow):
         self._make_slider(g_bl, 'skin_smooth', tr('Skin Smoothing'), default=0, tip='Frequency-separation bilateral filter on skin mask')
         self._make_slider(g_bl, 'skin_tone_even', tr('Skin Tone Even'), default=0, tip='Reduces redness and blotchiness via LAB color correction')
         self._make_slider(g_bl, 'teeth_whiten', tr('Teeth Whitening'), default=0, tip='HSV brightness boost in mouth region')
+        teeth_seg_row = QHBoxLayout()
+        teeth_seg_row.addWidget(QLabel(tr("Teeth Mask:")))
+        self.combo_teeth_segmenter = QComboBox()
+        for key, cfg in TEETH_SEGMENTER_OPTIONS.items():
+            self.combo_teeth_segmenter.addItem(cfg["label"], key)
+        self.combo_teeth_segmenter.setToolTip(
+            "SAM 2 segments individual teeth from MediaPipe lip landmarks; slower, downloads 156 MB on first use")
+        self.combo_teeth_segmenter.currentIndexChanged.connect(self._on_teeth_segmenter_changed)
+        teeth_seg_row.addWidget(self.combo_teeth_segmenter)
+        g_bl.addLayout(teeth_seg_row)
         self._make_slider(g_bl, 'eye_sharpen', tr('Eye Sharpen'), default=0, tip='Unsharp mask on eyes and brows for crisp detail')
         self._make_slider(g_bl, 'lip_color', tr('Lip Color'), default=0, tip='Boosts lip saturation and warmth')
         self._make_slider(g_bl, 'under_eye', tr('Under-Eye Smooth'), default=0, tip='Dedicated smoothing below the eyes')
@@ -817,6 +829,7 @@ class FaceSlimApp(QMainWindow):
     def _p(self):
         p = {k: s.value() for k, (s, _) in self.sliders.items()}
         p["post_stage_model"] = self._post_stage_model_key()
+        p["teeth_segmenter"] = self._teeth_segmenter_key()
         return p
 
     def _set_params(self, params):
@@ -828,6 +841,10 @@ class FaceSlimApp(QMainWindow):
             idx = self.combo_post_stage.findData(post_stage_model_key(params.get("post_stage_model")))
             if idx >= 0:
                 self.combo_post_stage.setCurrentIndex(idx)
+        if "teeth_segmenter" in params and hasattr(self, "combo_teeth_segmenter"):
+            idx = self.combo_teeth_segmenter.findData(teeth_segmenter_key(params.get("teeth_segmenter")))
+            if idx >= 0:
+                self.combo_teeth_segmenter.setCurrentIndex(idx)
         self.history.unfreeze()
         self._push()
         if self.image_mode:
@@ -966,6 +983,11 @@ class FaceSlimApp(QMainWindow):
             return post_stage_model_key(self.combo_post_stage.currentData())
         return POST_STAGE_OFF
 
+    def _teeth_segmenter_key(self):
+        if hasattr(self, "combo_teeth_segmenter"):
+            return teeth_segmenter_key(self.combo_teeth_segmenter.currentData())
+        return DEFAULT_TEETH_SEGMENTER
+
     def _set_parser_model_status(self):
         key = self._parser_model_key()
         ready = parser_model_ready(key)
@@ -1018,6 +1040,13 @@ class FaceSlimApp(QMainWindow):
             self._process_current_image()
         if hasattr(self, "toast"):
             self.toast.show_message(f"Post-stage: {post_stage_model_label(self._post_stage_model_key())}")
+
+    def _on_teeth_segmenter_changed(self, _idx):
+        self._push()
+        if self.image_mode:
+            self._process_current_image()
+        if hasattr(self, "toast"):
+            self.toast.show_message(f"Teeth mask: {teeth_segmenter_label(self._teeth_segmenter_key())}")
 
     def _benchmark_provider(self):
         if self._provider_diag_thread and self._provider_diag_thread.isRunning():
@@ -1181,7 +1210,7 @@ class FaceSlimApp(QMainWindow):
                 or self._image_engine is None or self.current_processed is None or not self.current_faces):
             return
         self.current_teeth_hint_rois = self._image_engine.teeth_hint_rois(
-            self.current_processed, self.current_faces)
+            self.current_processed, self.current_faces, self._p())
 
     def _go(self, src):
         self.stop_video()
@@ -1452,6 +1481,11 @@ class FaceSlimApp(QMainWindow):
         post_stage_idx = self.combo_post_stage.findData(saved_post_stage)
         if post_stage_idx >= 0:
             self.combo_post_stage.setCurrentIndex(post_stage_idx)
+        saved_teeth_segmenter = teeth_segmenter_key(
+            self.settings.value("teeth_segmenter", DEFAULT_TEETH_SEGMENTER, type=str))
+        teeth_segmenter_idx = self.combo_teeth_segmenter.findData(saved_teeth_segmenter)
+        if teeth_segmenter_idx >= 0:
+            self.combo_teeth_segmenter.setCurrentIndex(teeth_segmenter_idx)
         self._set_parser_model_status()
 
     def _save_settings(self):
@@ -1464,6 +1498,7 @@ class FaceSlimApp(QMainWindow):
         self.settings.setValue("parser_model", self._parser_model_key())
         self.settings.setValue("onnx_provider", self._onnx_provider_key())
         self.settings.setValue("post_stage_model", self._post_stage_model_key())
+        self.settings.setValue("teeth_segmenter", self._teeth_segmenter_key())
 
     def closeEvent(self, e):
         self._save_settings(); self.stop_video()

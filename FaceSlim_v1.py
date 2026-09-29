@@ -9,6 +9,13 @@ import sys
 
 multiprocessing.freeze_support()
 
+try:
+    # On Windows, torch's c10.dll fails to initialise (WinError 1114) if PyQt5 loads its
+    # bundled VC++ runtime first, so torch must be imported before any PyQt5 module.
+    import torch  # noqa: F401
+except Exception:
+    pass
+
 
 def _bootstrap():
     if sys.version_info < (3, 10):
@@ -21,7 +28,7 @@ def _bootstrap():
         'numpy': 'numpy', 'scipy': 'scipy', 'PIL': 'Pillow',
         'onnxruntime': 'onnxruntime',
     }
-    missing = []
+    missing = []        
     for mod, pkg in required.items():
         try:
             __import__(mod)

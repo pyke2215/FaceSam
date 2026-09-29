@@ -5,12 +5,16 @@ CLAUDE.md
 !README.md
 !CHANGELOG.md
 !THIRD_PARTY_NOTICES.md
+!docs/*.md
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Vendored sources installed by tools/setup_sam2.py
+third_party/sam2/
 
 # Build artifacts
 build/
@@ -24,9 +28,11 @@ bisenet_face_parsing.onnx
 modnet_*.onnx
 gfpgan_*.onnx
 real_esrgan_*.onnx
+sam2.1_*.pt
 *.tmp
 crash.log
 render.log
+debug.log
 faceslim_output/
 
 # AI config

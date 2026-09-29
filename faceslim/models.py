@@ -208,6 +208,29 @@ def ensure_matting_model():
         return True
     return False
 
+# ── SAM 2 Promptable Segmentation (teeth) ──────────────────────────────
+SAM2_MODEL = {
+    "key": "sam2.1_hiera_tiny",
+    "label": "SAM 2.1 Hiera Tiny",
+    "kind": "segmentation",
+    "filename": "sam2.1_hiera_tiny.pt",
+    "config": "configs/sam2.1/sam2.1_hiera_t.yaml",
+    "url": "https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_tiny.pt",
+    "source": "Meta AI SAM 2",
+    "source_url": "https://github.com/facebookresearch/sam2",
+    "license": "Apache-2.0",
+    "license_url": "https://github.com/facebookresearch/sam2/blob/main/LICENSE",
+    "size_bytes": 156_008_466,
+    "sha256": "7402e0d864fa82708a20fbd15bc84245c2f26dff0eb43a4b5b93452deb34be69",
+}
+SAM2_PATH = _model_path(SAM2_MODEL)
+
+def ensure_sam2_model():
+    if _download_verified_model(SAM2_MODEL, "SAM 2 teeth mask disabled"):
+        print(f"  {SAM2_MODEL['label']} checkpoint ready")
+        return True
+    return False
+
 
 RESTORATION_MODELS = {
     "gfpgan_1.4": {
@@ -446,6 +469,7 @@ def all_model_configs():
         + [PARSER_MODELS[key] for key in sorted(PARSER_MODELS)]
         + [MATTE_MODEL]
         + [RESTORATION_MODELS[key] for key in sorted(RESTORATION_MODELS)]
+        + [SAM2_MODEL]
     )
 
 
@@ -460,6 +484,8 @@ def model_config_by_key(model_key):
 def model_runtime_provider(cfg, provider_preference=None):
     if cfg.get("kind") == "landmark":
         return "MediaPipe Tasks / TFLite"
+    if cfg.get("kind") == "segmentation":
+        return "PyTorch (sam2 package)"
     return resolve_onnx_providers(provider_preference)["selected_provider"] or "unavailable"
 
 
